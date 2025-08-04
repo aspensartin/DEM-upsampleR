@@ -25,40 +25,68 @@
 #' @export
 
 # testing
-expt <- "../L23j/muffin.CB.L23j_025_k32_bathy+clim.BASES-1.config"
-dem <- "../Scotese/Map08_PALEOMAP_1deg_Late_Oligocene_25Ma.nc"
+expt <- "cGENIE/muffin.CB.L23z_000_z32.BASES-1.config/biogem/fields_biogem_3d.nc"
+dem <- "PALEOMAP/Map01_PALEOMAP_1deg_Holocene_0Ma.nc"
 vari <- "ocn_O2"
-dist <- 1000
-zlim <- 2
-hlim <- 9
+hlim <- 12
+zlim <- 1
 
-cGENIE.DEM.interp <- function(expt, dem, vari, hlim, zlim) {
+DEM.upsample <- function(expt, dem, vari, hlim, zlim) {
 
     library(dplyr)
-    library(PaleoClimR)
+    library(reshape2)
     library(geosphere)
     library(RNetCDF)
 
+    # variable names within model output and DEM .nc files
+    # configured for cGENIE and PALEOMAP by default, modify as needed
+    latn_model <- "lat"
+    lonn_model <- "lon"
+    depthn_model <- "zt"
+    timen_model <- "time"
+    latn_DEM <- "lat"
+    lonn_DEM <- "lon"
+    depthn_DEM <- "z"
+
     # extract cGENIE data
-    df_cGENIE <- cGENIE.data.3D(vari, expt, "default", "biogem")
-    depths_cGENIE <- as.vector(sort(unique(df_cGENIE$depth)))
-    slices_cGENIE <- vector("list", length = length(depths_cGENIE))
-    for (i in seq_along(depths_cGENIE)) {
-        slices_cGENIE[[i]] <- filter(df_cGENIE, depth.level == i)
+    nc_model <- open.nc(expt)
+    lat_model <- var.get.nc(nc_model, latn_model)
+    lon_model <- var.get.nc(nc_model, lonn_model)
+    depth_model <- var.get.nc(nc_model, depthn_model)
+    var_model <- var.get.nc(nc_model, vari)
+    time_model <- var.get.nc(nc_model, timen_model)
+    close.nc(nc_model)
+    # find final timestep
+    timestep_model <- length(time_model)
+    # adjust longitudes
+    if (mean(between(lon_model, -180, 180)) < 1) {
+        lon_model[lon_model <= -180] <- lon_model[lon_model <= -180] + 360
+    }
+    # create dataframes for each depth level
+    slices_model <- vector("list", length = length(unique(depth_model)))
+    for (i in seq_along(slices_model)) {
+        slices_model[[i]] <- as.data.frame(
+            cbind(
+                rep(lon_model, times = length(lat_model), each = 1),
+                rep(lat_model, times = 1, each = length(lon_model)),
+                as.data.frame(melt(var_model[, , i, timestep_model]))$value
+            )
+        )
+        names(slices_model[[i]]) <- c("lon", "lat", "var")
     }
 
     # extract DEM data and compile to dataframe
-    nc <- open.nc(dem)
-    lat <- var.get.nc(nc, "lat")
-    lon <- var.get.nc(nc, "lon")
-    depth <- var.get.nc(nc, "z")
-    close.nc(nc)
-    depth <- depth * -1
+    nc_DEM <- open.nc(dem)
+    lat_DEM <- var.get.nc(nc_DEM, latn_DEM)
+    lon_DEM <- var.get.nc(nc_DEM, lonn_DEM)
+    depth_DEM <- var.get.nc(nc_DEM, depthn_DEM)
+    close.nc(nc_DEM)
+    depth_DEM <- depth_DEM * -1
     df_DEM <- as.data.frame(
         cbind(
-            rep(lon, times = length(lat), each = 1),
-            rep(lat, times = 1, each = length(lon)),
-            as.data.frame(melt(depth))$value
+            rep(lon_DEM, times = length(lat_DEM), each = 1),
+            rep(lat_DEM, times = 1, each = length(lon_DEM)),
+            as.data.frame(melt(depth_DEM))$value
         )
     )
     names(df_DEM) <- c("lon", "lat", "depth")
@@ -74,8 +102,9 @@ cGENIE.DEM.interp <- function(expt, dem, vari, hlim, zlim) {
 
     # create cGENIE-DEM distances lookup matrix
     mat_DEM <- as.matrix(df_DEM[, c("lon", "lat")])
-    mat_cGENIE <- as.matrix(slices_cGENIE[[1]][, c("lon.mid", "lat.mid")])
-    mat_dist <- distm(mat_DEM, mat_cGENIE, fun = distCosine)
+    mat_model <- as.matrix(slices_model[[1]][, c("lon", "lat")])
+    mat_dist <- distm(mat_DEM, mat_model, fun = distCosine)
+    depths_model <- as.vector(sort(unique(depth_model)))
 
     df_DEM <- df_DEM %>% mutate(row_index = row_number()) %>%
         rowwise() %>%
@@ -85,8 +114,8 @@ cGENIE.DEM.interp <- function(expt, dem, vari, hlim, zlim) {
             order_index = list(ord[seq_len(min(hlim, length(ord)))]),
             var_interp = case_when(
                 # shallow case:
-                depth <= min(depths_cGENIE) ~ {
-                    df_layer <- slices_cGENIE[[1]]
+                depth <= min(depths_model) ~ {
+                    df_layer <- slices_model[[1]]
                     # find nearest valid cell
                     first_valid <- which(!is.na(df_layer$var[order_index]))
                     if (length(first_valid) > 0) {
@@ -96,8 +125,8 @@ cGENIE.DEM.interp <- function(expt, dem, vari, hlim, zlim) {
                     }
                 },
                 # deep case:
-                depth >= max(depths_cGENIE) ~ {
-                    df_layer <- slices_cGENIE[[length(slices_cGENIE)]]
+                depth >= max(depths_model) ~ {
+                    df_layer <- slices_model[[length(slices_model)]]
                     # find nearest valid cell
                     first_valid <- which(!is.na(df_layer$var[order_index]))
                     if (length(first_valid) > 0) {
@@ -107,11 +136,11 @@ cGENIE.DEM.interp <- function(expt, dem, vari, hlim, zlim) {
                     else if (zlim > 0) {
                         found_var <- NA_real_
                         for (i in seq(1, zlim)) {
-                            layer_index <- length(slices_cGENIE) - i
+                            layer_index <- length(slices_model) - i
                             if (layer_index < 1) {
                                 break
                             }
-                            df_layer <- slices_cGENIE[[layer_index]]
+                            df_layer <- slices_model[[layer_index]]
                             first_valid <- which(!is.na(df_layer$var[order_index]))
                             if (length(first_valid) > 0) {
                                 found_var <- df_layer$var[order_index[first_valid[1]]]
@@ -129,19 +158,19 @@ cGENIE.DEM.interp <- function(expt, dem, vari, hlim, zlim) {
                     # find layers immediately above and below depth
                     index_above <- findInterval(
                         x = depth,
-                        vec = depths_cGENIE,
+                        vec = depths_model,
                         all.inside = TRUE
                     )
                     index_below <- index_above + 1
-                    layer_above <- slices_cGENIE[[index_above]]
-                    layer_below <- slices_cGENIE[[index_below]]
+                    layer_above <- slices_model[[index_above]]
+                    layer_below <- slices_model[[index_below]]
                     # find nearest valid cells for each layer
                     first_valid_above <- which(!is.na(layer_above$var[order_index]))
                     first_valid_below <- which(!is.na(layer_below$var[order_index]))
                     # interpolate if both cells are valid
                     if (length(first_valid_above) > 0 && length(first_valid_below) > 0) {
-                        depth_above <- depths_cGENIE[index_above]
-                        depth_below <- depths_cGENIE[index_below]
+                        depth_above <- depths_model[index_above]
+                        depth_below <- depths_model[index_below]
                         var_above <- layer_above$var[order_index[first_valid_above[1]]]
                         var_below <- layer_below$var[order_index[first_valid_below[1]]]
                         approx(
@@ -158,7 +187,7 @@ cGENIE.DEM.interp <- function(expt, dem, vari, hlim, zlim) {
                             if (layer_index < 1) {
                                 break
                             }
-                            df_layer <- slices_cGENIE[[layer_index]]
+                            df_layer <- slices_model[[layer_index]]
                             first_valid <- which(!is.na(df_layer$var[order_index]))
                             if (length(first_valid) > 0) {
                                 found_var <- df_layer$var[order_index[first_valid[1]]]
